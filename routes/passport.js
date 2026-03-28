@@ -144,11 +144,13 @@ router.post('/:projectId/init', authenticate, requireAdmin, async (req, res) => 
   const { projectId } = req.params;
 
   const DEFAULT_STAGES = [
-    { num: '1',  name: 'Техническое задание',              sub: null },
-    { num: '2',  name: 'ГПЗУ',                             sub: null },
-    { num: 'bzu',name: 'Границы ЗУ',                       sub: null },
-    { num: '3',  name: 'Договор аренды земельного участка',sub: null },
-    { num: '4',  name: 'Технологическое задание',          sub: null },
+    { num: '1',       name: 'Техническое задание',              sub: null },
+    { num: '2',       name: 'ГПЗУ',                             sub: null },
+    { num: 'bzu',     name: 'Границы ЗУ',                       sub: null },
+    { num: '3',       name: 'Договор аренды земельного участка', sub: null },
+    { num: 'kvart',   name: 'Квартирография',                   sub: null },
+    { num: 'snos',    name: 'Снос',                             sub: null },
+    { num: '4',       name: 'Технологическое задание',          sub: null },
     { num: '5',  name: 'ИИ',   sub: 'инженерно-геодезические' },
     { num: '6',  name: null,   sub: 'инженерно-геологические' },
     { num: '7',  name: null,   sub: 'инженерно-экологические' },
@@ -180,13 +182,14 @@ router.post('/:projectId/init', authenticate, requireAdmin, async (req, res) => 
     { num: null, name: null, sub: 'выход' },
     { num: '24', name: 'МГЭ (сметы)', sub: 'вход' },
     { num: null, name: null, sub: 'выход' },
-    { num: '25', name: 'РД', sub: 'Начало выдачи' },
-    { num: null, name: null, sub: 'Окончание выдачи' },
-    { num: null, name: null, sub: 'Согласование ВПР' },
-    { num: '26', name: 'Документация стадии П', sub: null },
-    { num: '27', name: 'Документация стадии Р', sub: null },
-    { num: '28', name: 'Начало СМР',             sub: null },
-    { num: '29', name: 'Ввод в эксплуатацию',    sub: null },
+    { num: '25',      name: 'РД',                      sub: 'Начало выдачи' },
+    { num: null,      name: null,                      sub: 'Окончание выдачи' },
+    { num: null,      name: null,                      sub: 'Согласование ВПР' },
+    { num: 'rd_zero', name: 'Выдача РД "нулевого цикла"', sub: null },
+    { num: '26',      name: 'Документация стадии П',   sub: null },
+    { num: '27',      name: 'Документация стадии Р',   sub: null },
+    { num: '28',      name: 'Начало СМР',              sub: null },
+    { num: '29',      name: 'Ввод в эксплуатацию',     sub: null },
   ];
 
   try {

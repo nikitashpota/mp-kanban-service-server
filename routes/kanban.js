@@ -4,14 +4,15 @@ const { authenticate, requireAdmin } = require('../middleware/auth');
 
 // Columns shown in kanban — mapped to stage_num in passport_stages
 // Group → column label → stage_num
-const KANBAN_STAGE_NUMS = ['1','2','3','bzu','5','6','7','10','15','18','trans','shopr','22','23'];
+const KANBAN_STAGE_NUMS = ['1','2','3','bzu','5','6','7','10','13','14','15','18','trans','shopr','22','23','kvart','snos','rd_zero'];
 
 // GET /api/kanban — all projects with passport summary + kanban stage statuses
 router.get('/', authenticate, async (req, res) => {
   try {
     // All active projects with type info and passport
     const projectsRes = await pool.query(`
-      SELECT p.*, pt.name AS type_name, pt.color AS type_color, pt.is_renovation AS type_is_renovation,
+      SELECT p.*, pt.name AS type_name, pt.color AS type_color,
+             pt.is_renovation AS type_is_renovation, pt.kanban_type AS type_kanban_type,
              pp.contract_pir, pp.customer, pp.completion_date as passport_completion
       FROM projects p
       LEFT JOIN project_types pt ON pt.id = p.project_type_id

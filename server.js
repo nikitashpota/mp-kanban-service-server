@@ -154,6 +154,7 @@ async function initDb() {
     `ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS execution_planned_2 DATE DEFAULT NULL`,
     `ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS execution_actual_2 DATE DEFAULT NULL`,
     `ALTER TABLE project_types ADD COLUMN IF NOT EXISTS is_renovation BOOLEAN DEFAULT false`,
+    `ALTER TABLE project_types ADD COLUMN IF NOT EXISTS kanban_type VARCHAR(20) DEFAULT 'administrative'`,
   ];
 
   for (const sql of statements) {

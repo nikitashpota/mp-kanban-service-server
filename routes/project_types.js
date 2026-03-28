@@ -12,12 +12,12 @@ router.get('/', authenticate, async (req, res) => {
 
 // POST create
 router.post('/', authenticate, requireAdmin, async (req, res) => {
-  const { name, color, is_renovation } = req.body;
+  const { name, color, is_renovation, kanban_type } = req.body;
   if (!name) return res.status(400).json({ error: 'Название обязательно' });
   try {
     const { rows } = await pool.query(
-      'INSERT INTO project_types (name, color, is_renovation) VALUES ($1, $2, $3) RETURNING *',
-      [name, color || '#6b7280', is_renovation || false]
+      'INSERT INTO project_types (name, color, is_renovation, kanban_type) VALUES ($1, $2, $3, $4) RETURNING *',
+      [name, color || '#6b7280', is_renovation || false, kanban_type || 'administrative']
     );
     res.status(201).json(rows[0]);
   } catch (err) { res.status(500).json({ error: 'Ошибка создания' }); }
@@ -25,11 +25,11 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
 
 // PUT update
 router.put('/:id', authenticate, requireAdmin, async (req, res) => {
-  const { name, color, is_renovation } = req.body;
+  const { name, color, is_renovation, kanban_type } = req.body;
   try {
     const { rows } = await pool.query(
-      'UPDATE project_types SET name=$1, color=$2, is_renovation=$3 WHERE id=$4 RETURNING *',
-      [name, color || '#6b7280', is_renovation || false, req.params.id]
+      'UPDATE project_types SET name=$1, color=$2, is_renovation=$3, kanban_type=$4 WHERE id=$5 RETURNING *',
+      [name, color || '#6b7280', is_renovation || false, kanban_type || 'administrative', req.params.id]
     );
     res.json(rows[0]);
   } catch (err) { res.status(500).json({ error: 'Ошибка' }); }
