@@ -10,7 +10,12 @@ router.get('/:projectId', authenticate, async (req, res) => {
       'SELECT * FROM project_passport WHERE project_id=$1', [projectId]
     );
     const stages = await pool.query(
-      'SELECT * FROM passport_stages WHERE project_id=$1 ORDER BY sort_order', [projectId]
+      `SELECT ps.*, pp.execution_planned_2 AS parent_planned_2, pp.execution_actual_2 AS parent_actual_2,
+              pp.kanban_status_2 AS parent_kanban_status_2
+       FROM passport_stages ps
+       LEFT JOIN passport_stages pp ON pp.id = ps.kanban_parent_id
+       WHERE ps.project_id=$1 ORDER BY ps.sort_order`,
+      [projectId]
     );
     const issues = await pool.query(
       'SELECT * FROM passport_issues WHERE project_id=$1 ORDER BY sort_order', [projectId]
@@ -95,7 +100,7 @@ router.patch('/:projectId/stages/:stageId', authenticate, requireAdmin, async (r
 
   const allowed = ['readiness','deadline_contract','deadline_directive',
     'execution_planned','execution_actual','responsible','note',
-    'stage_name','sub_stage_name'];
+    'stage_name','sub_stage_name','kanban_status','kanban_status_2'];
 
   const sets = [];
   const vals = [];
@@ -110,111 +115,198 @@ router.patch('/:projectId/stages/:stageId', authenticate, requireAdmin, async (r
     const { rows } = await pool.query(
       `UPDATE passport_stages SET ${sets.join(',')} WHERE id=$${idx} RETURNING *`, vals
     );
-    res.json(rows[0]);
+    const updated = rows[0];
+
+    // ── Sync: if this row is kanban_slot=2, mirror _2 fields to parent ──
+    if (updated.kanban_slot === 2 && updated.kanban_parent_id) {
+      const syncSets = [];
+      const syncVals = [];
+      let si = 1;
+      if ('execution_planned' in fields) { syncSets.push(`execution_planned_2=$${si++}`); syncVals.push(n(fields.execution_planned)); }
+      if ('execution_actual' in fields)  { syncSets.push(`execution_actual_2=$${si++}`);  syncVals.push(n(fields.execution_actual)); }
+      if ('kanban_status' in fields)     { syncSets.push(`kanban_status_2=$${si++}`);      syncVals.push(n(fields.kanban_status)); }
+      if (syncSets.length) {
+        syncVals.push(updated.kanban_parent_id);
+        await pool.query(`UPDATE passport_stages SET ${syncSets.join(',')} WHERE id=$${si}`, syncVals);
+      }
+    }
+
+    // ── Sync: if this is slot=1 parent, also keep kanban_status from kanban_status field ──
+    if (updated.kanban_slot === 1 && 'kanban_status' in fields) {
+      await pool.query(`UPDATE passport_stages SET kanban_status=$1 WHERE id=$2`,
+        [n(fields.kanban_status), stageId]);
+    }
+
+    res.json(updated);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Ошибка обновления' });
   }
 });
 
-// ── Issues CRUD ───────────────────────────────────────────────
-router.put('/:projectId/issues', authenticate, requireAdmin, async (req, res) => {
-  const { projectId } = req.params;
-  const { issues } = req.body;
-  const n = v => (v === '' || v == null) ? null : v;
-  try {
-    await pool.query('DELETE FROM passport_issues WHERE project_id=$1', [projectId]);
-    for (let i = 0; i < issues.length; i++) {
-      const iss = issues[i];
-      await pool.query(
-        'INSERT INTO passport_issues (project_id, sort_order, problem, solution) VALUES ($1,$2,$3,$4)',
-        [projectId, i, n(iss.problem), n(iss.solution)]
-      );
-    }
-    const { rows } = await pool.query(
-      'SELECT * FROM passport_issues WHERE project_id=$1 ORDER BY sort_order', [projectId]
-    );
-    res.json(rows);
-  } catch (err) {
-    res.status(500).json({ error: 'Ошибка' });
-  }
+
+// ── Init endpoint (auto-detect type via init-v2) ──────────────
+// Keep old /init for backwards compat but redirect to init-v2
+router.post('/:projectId/init', authenticate, requireAdmin, async (req, res) => {
+  req.url = req.url.replace('/init', '/init-v2');
+  // Forward to init-v2 logic below
+  res.redirect(307, `/api/passport/${req.params.projectId}/init-v2`);
 });
 
-// ── Init default stages for new passport ─────────────────────
-router.post('/:projectId/init', authenticate, requireAdmin, async (req, res) => {
+// ── KANBAN_SLOT mapping ──────────────────────────────────────
+// Marks which sub-rows feed kanban slot 2 on their parent
+// slot: 1 = parent (feeds kanban_status + execution_actual)
+//       2 = child  (feeds kanban_status_2 + execution_actual_2 on parent)
+// kslot_key: stage_num used for grouping (null sub-rows inherit from parent)
+
+// ADMINISTRATIVE stages with kanban_slot annotations
+const ADMIN_STAGES = [
+  { num: '1',     name: 'Техническое задание',                     sub: null,                                 slot: 1 },
+  { num: '2',     name: 'ГПЗУ',                                    sub: null,                                 slot: 1 },
+  { num: '3',     name: 'Договор аренды земельного участка',       sub: null,                                 slot: 1 },
+  { num: '4',     name: 'Технологическое задание',                 sub: null },
+  { num: '5',     name: 'ИИ',                                      sub: 'инженерно-геодезические',            slot: 1 },
+  { num: '6',     name: null,                                      sub: 'инженерно-геологические',            slot: 1 },
+  { num: '7',     name: null,                                      sub: 'инженерно-экологические',            slot: 1 },
+  { num: '8',     name: null,                                      sub: 'инженерно-гидрологические' },
+  { num: '9',     name: null,                                      sub: 'обследование' },
+  { num: '10',    name: 'АПР',                                     sub: 'разработка',                         slot: 1 },
+  { num: null,    name: null,                                      sub: 'согласование',                       slot: 2, parentNum: '10' },
+  { num: '11',    name: 'Рассмотрение на Штабе ОПР',              sub: null },
+  { num: 'shopr', name: 'ШОПР',                                   sub: null,                                 slot: 1 },
+  { num: 'trans', name: 'Транспортная доступность',               sub: null,                                 slot: 1 },
+  { num: 'bzu',   name: 'Границы ЗУ',                             sub: null,                                 slot: 1 },
+  { num: '12',    name: 'Задание на проектирование',              sub: 'разработка' },
+  { num: null,    name: null,                                      sub: 'согласование' },
+  { num: '13',    name: 'Выдача нагрузок (для договоров с РСО)', sub: null },
+  { num: '14',    name: 'Получение договоров ТП (ТУ с РСО)',      sub: null },
+  { num: '15',    name: 'АФК (пред. АГР)',                        sub: 'разработка' },
+  { num: null,    name: null,                                      sub: 'первичное рассмотрение ДГП',             slot: 1, selfNum: '15' },
+  { num: null,    name: null,                                      sub: 'согласование ДГП+МЭР',               slot: 2, parentNum: '15' },
+  { num: '16',    name: 'Низкополигональная модель',              sub: null },
+  { num: '17',    name: 'Высокополигональная модель',             sub: null },
+  { num: '18',    name: 'АГР',                                    sub: 'разработка',                         slot: 1 },
+  { num: null,    name: null,                                      sub: 'согласование',                       slot: 2, parentNum: '18' },
+  { num: '19',    name: 'ТИМ-модель',                             sub: null },
+  { num: '21',    name: 'Проектная документация',                 sub: null },
+  { num: '22',    name: 'МГЭ (ЗнП на ТЭО)',                      sub: 'вход',                                slot: 1 },
+  { num: null,    name: null,                                      sub: 'выход' },
+  { num: '23',    name: 'МГЭ (тех.часть)',                        sub: 'вход',                                slot: 1 },
+  { num: null,    name: null,                                      sub: 'выход' },
+  { num: '24',    name: 'МГЭ (сметы)',                            sub: 'вход' },
+  { num: null,    name: null,                                      sub: 'выход' },
+  { num: '25',    name: 'РД',                                     sub: 'Начало выдачи' },
+  { num: null,    name: null,                                      sub: 'Окончание выдачи' },
+  { num: null,    name: null,                                      sub: 'Согласование ВПР' },
+  { num: '26',    name: 'Документация стадии П',                  sub: null },
+  { num: null,    name: null,                                      sub: 'Корректировка' },
+  { num: null,    name: null,                                      sub: 'На проверке' },
+  { num: null,    name: null,                                      sub: 'В разработке' },
+  { num: null,    name: null,                                      sub: 'Приняты' },
+  { num: '27',    name: 'Документация стадии Р',                  sub: null },
+  { num: null,    name: null,                                      sub: 'Выдано в работу' },
+  { num: '28',    name: 'Начало СМР',                             sub: null },
+  { num: '29',    name: 'Ввод в эксплуатацию',                   sub: null },
+];
+
+// RESIDENTIAL stages (МКД/Реновация)
+const RESIDENTIAL_STAGES = [
+  { num: '2',       name: 'ГПЗУ',                                          sub: null,                                            slot: 1 },
+  { num: '1',       name: 'Техническое задание',                           sub: null,                                            slot: 1 },
+  { num: '5',       name: 'Инженерные изыскания и обследование',           sub: 'инженерно-геодезические',                       slot: 1 },
+  { num: '6',       name: null,                                            sub: 'инженерно-геологические',                       slot: 1 },
+  { num: '7',       name: null,                                            sub: 'инженерно-экологические',                       slot: 1 },
+  { num: '9',       name: null,                                            sub: 'обследование' },
+  { num: 'kvart',   name: 'Квартирография',                               sub: 'получение',                                     slot: 1 },
+  { num: null,      name: null,                                            sub: 'корректировка' },
+  { num: null,      name: null,                                            sub: 'утверждена в МФР (1 этап АПР)',                  slot: 2, parentNum: 'kvart' },
+  { num: '10',      name: 'АПР',                                          sub: 'направлены в МФР',                               slot: 1 },
+  { num: null,      name: null,                                            sub: 'согласованы в МФР',                             slot: 2, parentNum: '10' },
+  { num: '13',      name: 'Выдача нагрузок (для договоров с РСО)',        sub: null,                                            slot: 1 },
+  { num: '14',      name: 'Получение договоров ТП (ТУ с РСО)',            sub: null,                                            slot: 1 },
+  { num: null,      name: null,                                            sub: 'ПАО "Россети" (электроснабжение)' },
+  { num: null,      name: null,                                            sub: 'АО "Мосводоканал" (водоснабжение)' },
+  { num: null,      name: null,                                            sub: 'АО "Мосводоканал" (водоотведение)' },
+  { num: null,      name: null,                                            sub: 'ГУП "Мосводосток" (водоотведение)' },
+  { num: null,      name: null,                                            sub: 'ПАО "МОЭК" (теплоснабжение)' },
+  { num: null,      name: null,                                            sub: 'ПАО "МГТС" (сети связи)' },
+  { num: '15',      name: 'Пред АГР',                                     sub: 'загружено',                                     slot: 1 },
+  { num: null,      name: null,                                            sub: 'согласовано',                                   slot: 2, parentNum: '15' },
+  { num: '18',      name: 'АГР',                                          sub: 'загружено',                                     slot: 1 },
+  { num: null,      name: null,                                            sub: 'утверждено',                                    slot: 2, parentNum: '18' },
+  { num: '21',      name: 'Проектная документация',                       sub: null },
+  { num: '22',      name: 'МГЭ (ЗнП на ТЭО)',                            sub: 'вход',                                           slot: 1 },
+  { num: null,      name: null,                                            sub: 'выход' },
+  { num: '23',      name: 'МГЭ (тех. часть)',                             sub: 'вход',                                           slot: 1 },
+  { num: null,      name: null,                                            sub: 'выход' },
+  { num: '24',      name: 'МГЭ (сметы подготовительный период)',          sub: 'вход' },
+  { num: null,      name: null,                                            sub: 'выход' },
+  { num: '25',      name: 'РД',                                           sub: 'Начало выдачи' },
+  { num: 'rd_zero', name: null,                                           sub: 'Выдача нулевого цикла',                          slot: 1 },
+  { num: null,      name: null,                                           sub: 'Окончание выдачи' },
+  { num: null,      name: null,                                           sub: 'Согласование ВПР' },
+  { num: '26',      name: 'Документация стадии П',                       sub: null },
+  { num: null,      name: null,                                           sub: 'Корректировка' },
+  { num: null,      name: null,                                           sub: 'На проверке' },
+  { num: null,      name: null,                                           sub: 'В разработке' },
+  { num: null,      name: null,                                           sub: 'Приняты' },
+  { num: '27',      name: 'Документация стадии Р',                       sub: null },
+  { num: null,      name: null,                                           sub: 'Выдано в работу' },
+  { num: 'snos',    name: 'Снос существующих зданий',                    sub: null,                                             slot: 1 },
+  { num: '28',      name: 'Начало СМР',                                  sub: null },
+  { num: '29',      name: 'Ввод в эксплуатацию',                         sub: null },
+];
+
+// POST /passport/:projectId/init-v2 — auto-detect type and create stages
+router.post('/:projectId/init-v2', authenticate, requireAdmin, async (req, res) => {
   const { projectId } = req.params;
-
-  const DEFAULT_STAGES = [
-    { num: '1',       name: 'Техническое задание',              sub: null },
-    { num: '2',       name: 'ГПЗУ',                             sub: null },
-    { num: 'bzu',     name: 'Границы ЗУ',                       sub: null },
-    { num: '3',       name: 'Договор аренды земельного участка', sub: null },
-    { num: 'kvart',   name: 'Квартирография',                   sub: null },
-    { num: 'snos',    name: 'Снос',                             sub: null },
-    { num: '4',       name: 'Технологическое задание',          sub: null },
-    { num: '5',  name: 'ИИ',   sub: 'инженерно-геодезические' },
-    { num: '6',  name: null,   sub: 'инженерно-геологические' },
-    { num: '7',  name: null,   sub: 'инженерно-экологические' },
-    { num: '8',  name: null,   sub: 'инженерно-гидрологические' },
-    { num: '9',  name: null,   sub: 'обследование' },
-    { num: '10', name: 'АПР',  sub: 'разработка' },
-    { num: null, name: null,   sub: 'согласование' },
-    { num: '11', name: 'Рассмотрение на Штабе ОПР',        sub: null },
-    { num: 'shopr', name: 'ШОПР',                          sub: null },
-    { num: 'trans', name: 'Транспортная доступность',      sub: null },
-    { num: '12', name: 'Задание на проектирование', sub: 'разработка' },
-    { num: null, name: null,   sub: 'согласование' },
-    { num: '13', name: 'Выдача нагрузок (для договоров с РСО)', sub: null },
-    { num: '14', name: 'Получение договоров ТП (ТУ с РСО)',    sub: null },
-    { num: '15', name: 'АФК (пред. АГР)', sub: 'разработка' },
-    { num: null, name: null, sub: 'первичное рассмотрение ДГП' },
-    { num: null, name: null, sub: 'согласование ДГП+МЭР' },
-    { num: '16', name: 'Низкополигональная модель',  sub: null },
-    { num: '17', name: 'Высокополигональная модель', sub: null },
-    { num: '18', name: 'АГР', sub: 'разработка' },
-    { num: null, name: null, sub: 'согласование' },
-    { num: '19', name: 'ТИМ-модель', sub: null },
-    { num: null, name: 'КУ ТИМ',    sub: 'заход' },
-    { num: '20', name: null,         sub: 'выход' },
-    { num: '21', name: 'Проектная документация', sub: null },
-    { num: '22', name: 'МГЭ (ЗнП на ТЭО)', sub: 'вход' },
-    { num: null, name: null, sub: 'выход' },
-    { num: '23', name: 'МГЭ (тех. часть)', sub: 'вход' },
-    { num: null, name: null, sub: 'выход' },
-    { num: '24', name: 'МГЭ (сметы)', sub: 'вход' },
-    { num: null, name: null, sub: 'выход' },
-    { num: '25',      name: 'РД',                      sub: 'Начало выдачи' },
-    { num: null,      name: null,                      sub: 'Окончание выдачи' },
-    { num: null,      name: null,                      sub: 'Согласование ВПР' },
-    { num: 'rd_zero', name: 'Выдача РД "нулевого цикла"', sub: null },
-    { num: '26',      name: 'Документация стадии П',   sub: null },
-    { num: '27',      name: 'Документация стадии Р',   sub: null },
-    { num: '28',      name: 'Начало СМР',              sub: null },
-    { num: '29',      name: 'Ввод в эксплуатацию',     sub: null },
-  ];
-
   try {
     const existing = await pool.query(
       'SELECT id FROM passport_stages WHERE project_id=$1 LIMIT 1', [projectId]
     );
     if (existing.rows.length > 0) {
-      return res.status(409).json({ error: 'Этапы уже инициализированы' });
+      await pool.query('DELETE FROM passport_stages WHERE project_id=$1', [projectId]);
+      await pool.query('DELETE FROM passport_issues WHERE project_id=$1', [projectId]);
     }
 
-    for (let i = 0; i < DEFAULT_STAGES.length; i++) {
-      const s = DEFAULT_STAGES[i];
-      await pool.query(
-        `INSERT INTO passport_stages (project_id, sort_order, stage_num, stage_name, sub_stage_name)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [projectId, i, s.num, s.name, s.sub]
+    const typeRes = await pool.query(
+      `SELECT pt.kanban_type FROM projects p
+       LEFT JOIN project_types pt ON pt.id = p.project_type_id
+       WHERE p.id=$1`, [projectId]
+    );
+    const isResidential = typeRes.rows[0]?.kanban_type === 'residential';
+    const stages = isResidential ? RESIDENTIAL_STAGES : ADMIN_STAGES;
+
+    // Two-pass: insert rows, then set kanban_parent_id for slot-2 rows
+    const insertedIds = {};  // parentNum -> id of slot-1 row
+
+    for (let i = 0; i < stages.length; i++) {
+      const s = stages[i];
+      const { rows } = await pool.query(
+        `INSERT INTO passport_stages
+          (project_id, sort_order, stage_num, stage_name, sub_stage_name, kanban_slot)
+          VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+        [projectId, i, s.num, s.name, s.sub, s.slot || null]
       );
+      const newId = rows[0].id;
+      // Track slot-1 parents: by stage_num if set, or by selfNum if null
+      const trackKey = s.slot === 1 ? (s.num || s.selfNum) : null;
+      if (trackKey) insertedIds[trackKey] = newId;
+      // Set kanban_parent_id for slot-2 rows
+      if (s.slot === 2 && s.parentNum && insertedIds[s.parentNum]) {
+        await pool.query(
+          'UPDATE passport_stages SET kanban_parent_id=$1 WHERE id=$2',
+          [insertedIds[s.parentNum], newId]
+        );
+      }
     }
-    // Init 3 empty issues
+
     for (let i = 0; i < 3; i++) {
       await pool.query(
         'INSERT INTO passport_issues (project_id, sort_order) VALUES ($1,$2)', [projectId, i]
       );
     }
-    res.json({ message: 'Паспорт инициализирован' });
+    res.json({ message: isResidential ? 'Жилой паспорт создан' : 'Административный паспорт создан', type: isResidential ? 'residential' : 'administrative' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Ошибка инициализации' });

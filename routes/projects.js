@@ -121,10 +121,9 @@ router.get('/:id', authenticate, async (req, res) => {
 // ============================================================
 router.post('/', authenticate, requireAdmin, async (req, res) => {
   const {
-    name, address, inn, kpp, stage,
-    area_total, area_building, area_underground,
-    floors_above, floors_below, height,
-    completion_date, description, gip_name, gip_phone
+    name, address, inn, kpp, stage, area_total, area_building, area_underground,
+    floors_above, floors_below, height, completion_date, description,
+    gip_name, gip_phone, project_type_id
   } = req.body;
 
   if (!name) return res.status(400).json({ error: 'Название обязательно' });
@@ -135,11 +134,12 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO projects
          (name, address, inn, kpp, stage, area_total, area_building, area_underground,
-          floors_above, floors_below, height, completion_date, description, gip_name, gip_phone)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+          floors_above, floors_below, height, completion_date, description, gip_name, gip_phone, project_type_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
        RETURNING *`,
       [name, n(address), n(inn), n(kpp), n(stage), n(area_total), n(area_building), n(area_underground),
-       n(floors_above), n(floors_below), n(height), n(completion_date), n(description), n(gip_name), n(gip_phone)]
+       n(floors_above), n(floors_below), n(height), n(completion_date), n(description), n(gip_name), n(gip_phone),
+       n(project_type_id)]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -157,7 +157,8 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
     name, address, inn, kpp, stage,
     area_total, area_building, area_underground,
     floors_above, floors_below, height,
-    completion_date, description, gip_name, gip_phone, is_active, is_terminated
+    completion_date, description, gip_name, gip_phone,
+    is_active, is_terminated, project_type_id
   } = req.body;
 
   const n = v => (v === '' || v == null) ? null : v;
@@ -169,11 +170,11 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
          area_total=$6, area_building=$7, area_underground=$8,
          floors_above=$9, floors_below=$10, height=$11,
          completion_date=$12, description=$13, gip_name=$14,
-         gip_phone=$15, is_active=$16, is_terminated=$17
-       WHERE id=$18 RETURNING *`,
+         gip_phone=$15, is_active=$16, is_terminated=$17, project_type_id=$18
+       WHERE id=$19 RETURNING *`,
       [name, n(address), n(inn), n(kpp), n(stage), n(area_total), n(area_building), n(area_underground),
        n(floors_above), n(floors_below), n(height), n(completion_date), n(description), n(gip_name),
-       n(gip_phone), is_active ?? true, is_terminated ?? false, id]
+       n(gip_phone), is_active ?? true, is_terminated ?? false, n(project_type_id), id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Проект не найден' });
     res.json(rows[0]);
