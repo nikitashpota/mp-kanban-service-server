@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const { pool } = require('../db');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requirePassportEdit } = require('../middleware/auth');
 
 // Columns shown in kanban — mapped to stage_num in passport_stages
 // Group → column label → stage_num
@@ -70,7 +70,7 @@ router.get('/', authenticate, async (req, res) => {
 });
 
 // PATCH /api/kanban/stage/:stageId — update kanban status/date
-router.patch('/stage/:stageId', authenticate, requireAdmin, async (req, res) => {
+router.patch('/stage/:stageId', authenticate, requirePassportEdit, async (req, res) => {
   const { kanban_status, execution_planned, execution_actual, kanban_status_2,
           execution_planned_2, execution_actual_2, deadline_directive } = req.body;
 

@@ -49,7 +49,7 @@ async function initDb() {
       username VARCHAR(100) UNIQUE NOT NULL,
       password_hash VARCHAR(255) NOT NULL,
       full_name VARCHAR(255),
-      role VARCHAR(20) DEFAULT 'viewer' CHECK (role IN ('admin', 'viewer')),
+      role VARCHAR(20) DEFAULT 'viewer',
       created_at TIMESTAMP DEFAULT NOW()
     )`,
     `CREATE TABLE IF NOT EXISTS projects (
@@ -159,6 +159,12 @@ async function initDb() {
     `ALTER TABLE project_types ADD COLUMN IF NOT EXISTS kanban_type VARCHAR(20) DEFAULT 'administrative'`,
     `ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS kanban_slot INTEGER DEFAULT NULL`,
     `ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS kanban_parent_id INTEGER DEFAULT NULL`,
+    `ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`,
+`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'pm', 'gip', 'viewer'))`,
+`ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS execution_actual_pending DATE`,
+`ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS execution_actual_pending_2 DATE`,
+`ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS pending_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL`,
+`ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS pending_at TIMESTAMP`,
   ];
 
   for (const sql of statements) {

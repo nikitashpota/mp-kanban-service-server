@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const { pool } = require('../db');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireRole, requirePassportEdit } = require('../middleware/auth');
 
 // ── GET passport for project ──────────────────────────────────
 router.get('/:projectId', authenticate, async (req, res) => {
@@ -93,7 +93,7 @@ router.put('/:projectId/stages', authenticate, requireAdmin, async (req, res) =>
 });
 
 // ── Update single stage cell ──────────────────────────────────
-router.patch('/:projectId/stages/:stageId', authenticate, requireAdmin, async (req, res) => {
+router.patch('/:projectId/stages/:stageId', authenticate, requirePassportEdit, async (req, res) => {
   const { stageId } = req.params;
   const fields = req.body; // { field: value }
   const n = v => (v === '' || v == null) ? null : v;
