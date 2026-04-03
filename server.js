@@ -8,6 +8,7 @@ const projectRoutes = require('./routes/projects');
 const usersRoutes = require('./routes/users');
 const passportRoutes = require('./routes/passport');
 const kanbanRoutes = require('./routes/kanban');
+const importRoutes = require('./routes/import_passport');
 const projectTypesRoutes = require('./routes/project_types');
 const analyticsRoutes = require('./routes/analytics');
 const { pool } = require('./db');
@@ -32,6 +33,7 @@ app.use('/api/projects', projectRoutes);
 app.use('/api/users', usersRoutes);
 app.use('/api/passport', passportRoutes);
 app.use('/api/kanban', kanbanRoutes);
+app.use('/api/import', importRoutes);
 app.use('/api/project-types', projectTypesRoutes);
 app.use('/api/analytics', analyticsRoutes);
 

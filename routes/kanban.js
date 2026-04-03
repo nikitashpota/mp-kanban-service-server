@@ -69,11 +69,10 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// PATCH /api/kanban/stage/:stageId — update kanban_status for one cell
-// If stageId='new', creates the stage first (project_id + stage_num required in body)
+// PATCH /api/kanban/stage/:stageId — update kanban status/date
 router.patch('/stage/:stageId', authenticate, requireAdmin, async (req, res) => {
   const { kanban_status, execution_planned, execution_actual, kanban_status_2,
-          execution_planned_2, execution_actual_2, project_id, stage_num } = req.body;
+          execution_planned_2, execution_actual_2, deadline_directive } = req.body;
 
   const allowed = ['done', 'not_provided', 'needs_correction', 'in_progress', 'not_required', 'developed', null];
   if ('kanban_status' in req.body && !allowed.includes(kanban_status))
@@ -81,35 +80,20 @@ router.patch('/stage/:stageId', authenticate, requireAdmin, async (req, res) => 
   if ('kanban_status_2' in req.body && !allowed.includes(kanban_status_2))
     return res.status(400).json({ error: 'Недопустимый статус_2' });
 
+  const stageId = req.params.stageId;
+  if (!stageId || stageId === 'new')
+    return res.status(409).json({ error: 'Сначала создайте этапы паспорта на странице объекта' });
+
   try {
-    let stageId = req.params.stageId;
-
-    // Auto-create stage if it doesn't exist yet
-    if (stageId === 'new' && project_id && stage_num) {
-      const existing = await pool.query(
-        'SELECT id FROM passport_stages WHERE project_id=$1 AND stage_num=$2 LIMIT 1',
-        [project_id, stage_num]
-      );
-      if (existing.rows.length > 0) {
-        stageId = existing.rows[0].id;
-      } else {
-        const { rows } = await pool.query(
-          `INSERT INTO passport_stages (project_id, stage_num, sort_order, kanban_slot)
-           VALUES ($1, $2, 999, 1) RETURNING id`,
-          [project_id, stage_num]
-        );
-        stageId = rows[0].id;
-      }
-    }
-
     const sets = [];
     const vals = [];
-    if ('kanban_status' in req.body)       { sets.push(`kanban_status=$${vals.length+1}`);       vals.push(kanban_status); }
-    if (execution_planned !== undefined)    { sets.push(`execution_planned=$${vals.length+1}`);    vals.push(execution_planned || null); }
-    if (execution_actual !== undefined)     { sets.push(`execution_actual=$${vals.length+1}`);     vals.push(execution_actual || null); }
-    if ('kanban_status_2' in req.body)     { sets.push(`kanban_status_2=$${vals.length+1}`);      vals.push(kanban_status_2); }
-    if (execution_planned_2 !== undefined)  { sets.push(`execution_planned_2=$${vals.length+1}`);  vals.push(execution_planned_2 || null); }
-    if (execution_actual_2 !== undefined)   { sets.push(`execution_actual_2=$${vals.length+1}`);   vals.push(execution_actual_2 || null); }
+    if ('kanban_status' in req.body)      { sets.push(`kanban_status=$${vals.length+1}`);      vals.push(kanban_status); }
+    if (deadline_directive !== undefined)  { sets.push(`deadline_directive=$${vals.length+1}`);  vals.push(deadline_directive || null); }
+    if (execution_planned !== undefined)   { sets.push(`execution_planned=$${vals.length+1}`);   vals.push(execution_planned || null); }
+    if (execution_actual !== undefined)    { sets.push(`execution_actual=$${vals.length+1}`);    vals.push(execution_actual || null); }
+    if ('kanban_status_2' in req.body)    { sets.push(`kanban_status_2=$${vals.length+1}`);     vals.push(kanban_status_2); }
+    if (execution_planned_2 !== undefined) { sets.push(`execution_planned_2=$${vals.length+1}`); vals.push(execution_planned_2 || null); }
+    if (execution_actual_2 !== undefined)  { sets.push(`execution_actual_2=$${vals.length+1}`);  vals.push(execution_actual_2 || null); }
 
     if (!sets.length) return res.json({ id: stageId });
 

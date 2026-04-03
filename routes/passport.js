@@ -99,8 +99,8 @@ router.patch('/:projectId/stages/:stageId', authenticate, requireAdmin, async (r
   const n = v => (v === '' || v == null) ? null : v;
 
   const allowed = ['readiness','deadline_contract','deadline_directive',
-    'execution_planned','execution_actual','responsible','note',
-    'stage_name','sub_stage_name','kanban_status','kanban_status_2'];
+    'execution_planned','execution_actual','execution_planned_2','execution_actual_2',
+    'responsible','note','stage_name','sub_stage_name','kanban_status','kanban_status_2'];
 
   const sets = [];
   const vals = [];
@@ -265,8 +265,19 @@ router.post('/:projectId/init-v2', authenticate, requireAdmin, async (req, res) 
       'SELECT id FROM passport_stages WHERE project_id=$1 LIMIT 1', [projectId]
     );
     if (existing.rows.length > 0) {
-      await pool.query('DELETE FROM passport_stages WHERE project_id=$1', [projectId]);
-      await pool.query('DELETE FROM passport_issues WHERE project_id=$1', [projectId]);
+      // Check if there are any properly named stages
+      const namedStages = await pool.query(
+        'SELECT id FROM passport_stages WHERE project_id=$1 AND stage_name IS NOT NULL LIMIT 1',
+        [projectId]
+      );
+      if (namedStages.rows.length > 0) {
+        // Proper stages exist — delete all and recreate
+        await pool.query('DELETE FROM passport_stages WHERE project_id=$1', [projectId]);
+        await pool.query('DELETE FROM passport_issues WHERE project_id=$1', [projectId]);
+      } else {
+        // Only orphan auto-created stages — clean them up silently
+        await pool.query('DELETE FROM passport_stages WHERE project_id=$1 AND stage_name IS NULL', [projectId]);
+      }
     }
 
     const typeRes = await pool.query(
