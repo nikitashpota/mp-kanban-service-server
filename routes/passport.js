@@ -2,6 +2,9 @@ const router = require('express').Router();
 const { pool } = require('../db');
 const { authenticate, requireAdmin, requireRole, requirePassportEdit } = require('../middleware/auth');
 
+// ГИП и РП могут создавать/редактировать паспорт
+const requireEditor = requireRole('pm', 'gip');
+
 // ── GET passport for project ──────────────────────────────────
 router.get('/:projectId', authenticate, async (req, res) => {
   const { projectId } = req.params;
@@ -11,9 +14,11 @@ router.get('/:projectId', authenticate, async (req, res) => {
     );
     const stages = await pool.query(
       `SELECT ps.*, pp.execution_planned_2 AS parent_planned_2, pp.execution_actual_2 AS parent_actual_2,
-              pp.kanban_status_2 AS parent_kanban_status_2
+              pp.kanban_status_2 AS parent_kanban_status_2,
+              u.full_name AS pending_by_name
        FROM passport_stages ps
        LEFT JOIN passport_stages pp ON pp.id = ps.kanban_parent_id
+       LEFT JOIN users u ON u.id = ps.pending_by_user_id
        WHERE ps.project_id=$1 ORDER BY ps.sort_order`,
       [projectId]
     );
@@ -31,8 +36,8 @@ router.get('/:projectId', authenticate, async (req, res) => {
   }
 });
 
-// ── UPSERT passport header ────────────────────────────────────
-router.put('/:projectId/header', authenticate, requireAdmin, async (req, res) => {
+// ── UPSERT passport header (PM + GIP + admin) ─────────────────
+router.put('/:projectId/header', authenticate, requireEditor, async (req, res) => {
   const { projectId } = req.params;
   const {
     customer, functional_customer, general_designer,
@@ -59,10 +64,10 @@ router.put('/:projectId/header', authenticate, requireAdmin, async (req, res) =>
   }
 });
 
-// ── Bulk save stages (replace all) ───────────────────────────
+// ── Bulk replace stages — только admin (деструктивно) ─────────
 router.put('/:projectId/stages', authenticate, requireAdmin, async (req, res) => {
   const { projectId } = req.params;
-  const { stages } = req.body; // array
+  const { stages } = req.body;
   if (!Array.isArray(stages)) return res.status(400).json({ error: 'stages must be array' });
 
   const n = v => (v === '' || v == null) ? null : v;
@@ -92,10 +97,10 @@ router.put('/:projectId/stages', authenticate, requireAdmin, async (req, res) =>
   }
 });
 
-// ── Update single stage cell ──────────────────────────────────
+// ── Update single stage cell (PM + GIP + admin) ───────────────
 router.patch('/:projectId/stages/:stageId', authenticate, requirePassportEdit, async (req, res) => {
   const { stageId } = req.params;
-  const fields = req.body; // { field: value }
+  const fields = req.body;
   const n = v => (v === '' || v == null) ? null : v;
 
   const allowed = ['readiness','deadline_contract','deadline_directive',
@@ -117,7 +122,7 @@ router.patch('/:projectId/stages/:stageId', authenticate, requirePassportEdit, a
     );
     const updated = rows[0];
 
-    // ── Sync: if this row is kanban_slot=2, mirror _2 fields to parent ──
+    // Sync slot-2 → parent
     if (updated.kanban_slot === 2 && updated.kanban_parent_id) {
       const syncSets = [];
       const syncVals = [];
@@ -131,12 +136,6 @@ router.patch('/:projectId/stages/:stageId', authenticate, requirePassportEdit, a
       }
     }
 
-    // ── Sync: if this is slot=1 parent, also keep kanban_status from kanban_status field ──
-    if (updated.kanban_slot === 1 && 'kanban_status' in fields) {
-      await pool.query(`UPDATE passport_stages SET kanban_status=$1 WHERE id=$2`,
-        [n(fields.kanban_status), stageId]);
-    }
-
     res.json(updated);
   } catch (err) {
     console.error(err);
@@ -144,22 +143,38 @@ router.patch('/:projectId/stages/:stageId', authenticate, requirePassportEdit, a
   }
 });
 
+// ── Issues save ───────────────────────────────────────────────
+router.put('/:projectId/issues', authenticate, requirePassportEdit, async (req, res) => {
+  const { projectId } = req.params;
+  const { issues } = req.body;
+  if (!Array.isArray(issues)) return res.status(400).json({ error: 'issues must be array' });
+  const n = v => (v === '' || v == null) ? null : v;
+  try {
+    await pool.query('DELETE FROM passport_issues WHERE project_id=$1', [projectId]);
+    for (let i = 0; i < issues.length; i++) {
+      const iss = issues[i];
+      await pool.query(
+        'INSERT INTO passport_issues (project_id, sort_order, problem, solution) VALUES ($1,$2,$3,$4)',
+        [projectId, i, n(iss.problem), n(iss.solution)]
+      );
+    }
+    const { rows } = await pool.query(
+      'SELECT * FROM passport_issues WHERE project_id=$1 ORDER BY sort_order', [projectId]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Ошибка сохранения' });
+  }
+});
 
-// ── Init endpoint (auto-detect type via init-v2) ──────────────
-// Keep old /init for backwards compat but redirect to init-v2
-router.post('/:projectId/init', authenticate, requireAdmin, async (req, res) => {
-  req.url = req.url.replace('/init', '/init-v2');
-  // Forward to init-v2 logic below
+// ── Init endpoint (PM + GIP + admin) ─────────────────────────
+router.post('/:projectId/init', authenticate, requireEditor, async (req, res) => {
+  // Forward to init-v2
   res.redirect(307, `/api/passport/${req.params.projectId}/init-v2`);
 });
 
-// ── KANBAN_SLOT mapping ──────────────────────────────────────
-// Marks which sub-rows feed kanban slot 2 on their parent
-// slot: 1 = parent (feeds kanban_status + execution_actual)
-//       2 = child  (feeds kanban_status_2 + execution_actual_2 on parent)
-// kslot_key: stage_num used for grouping (null sub-rows inherit from parent)
-
-// ADMINISTRATIVE stages with kanban_slot annotations
+// ── Stage templates ───────────────────────────────────────────
 const ADMIN_STAGES = [
   { num: '1',     name: 'Техническое задание',                     sub: null,                                 slot: 1 },
   { num: '2',     name: 'ГПЗУ',                                    sub: null,                                 slot: 1 },
@@ -181,7 +196,7 @@ const ADMIN_STAGES = [
   { num: '13',    name: 'Выдача нагрузок (для договоров с РСО)', sub: null },
   { num: '14',    name: 'Получение договоров ТП (ТУ с РСО)',      sub: null },
   { num: '15',    name: 'АФК (пред. АГР)',                        sub: 'разработка' },
-  { num: null,    name: null,                                      sub: 'первичное рассмотрение ДГП',             slot: 1, selfNum: '15' },
+  { num: null,    name: null,                                      sub: 'первичное рассмотрение ДГП',         slot: 1, selfNum: '15' },
   { num: null,    name: null,                                      sub: 'согласование ДГП+МЭР',               slot: 2, parentNum: '15' },
   { num: '16',    name: 'Низкополигональная модель',              sub: null },
   { num: '17',    name: 'Высокополигональная модель',             sub: null },
@@ -209,7 +224,6 @@ const ADMIN_STAGES = [
   { num: '29',    name: 'Ввод в эксплуатацию',                   sub: null },
 ];
 
-// RESIDENTIAL stages (МКД/Реновация)
 const RESIDENTIAL_STAGES = [
   { num: '2',       name: 'ГПЗУ',                                          sub: null,                                            slot: 1 },
   { num: '1',       name: 'Техническое задание',                           sub: null,                                            slot: 1 },
@@ -257,25 +271,22 @@ const RESIDENTIAL_STAGES = [
   { num: '29',      name: 'Ввод в эксплуатацию',                         sub: null },
 ];
 
-// POST /passport/:projectId/init-v2 — auto-detect type and create stages
-router.post('/:projectId/init-v2', authenticate, requireAdmin, async (req, res) => {
+// POST /passport/:projectId/init-v2 (PM + GIP + admin)
+router.post('/:projectId/init-v2', authenticate, requireEditor, async (req, res) => {
   const { projectId } = req.params;
   try {
     const existing = await pool.query(
       'SELECT id FROM passport_stages WHERE project_id=$1 LIMIT 1', [projectId]
     );
     if (existing.rows.length > 0) {
-      // Check if there are any properly named stages
       const namedStages = await pool.query(
         'SELECT id FROM passport_stages WHERE project_id=$1 AND stage_name IS NOT NULL LIMIT 1',
         [projectId]
       );
       if (namedStages.rows.length > 0) {
-        // Proper stages exist — delete all and recreate
         await pool.query('DELETE FROM passport_stages WHERE project_id=$1', [projectId]);
         await pool.query('DELETE FROM passport_issues WHERE project_id=$1', [projectId]);
       } else {
-        // Only orphan auto-created stages — clean them up silently
         await pool.query('DELETE FROM passport_stages WHERE project_id=$1 AND stage_name IS NULL', [projectId]);
       }
     }
@@ -288,8 +299,7 @@ router.post('/:projectId/init-v2', authenticate, requireAdmin, async (req, res) 
     const isResidential = typeRes.rows[0]?.kanban_type === 'residential';
     const stages = isResidential ? RESIDENTIAL_STAGES : ADMIN_STAGES;
 
-    // Two-pass: insert rows, then set kanban_parent_id for slot-2 rows
-    const insertedIds = {};  // parentNum -> id of slot-1 row
+    const insertedIds = {};
 
     for (let i = 0; i < stages.length; i++) {
       const s = stages[i];
@@ -300,10 +310,8 @@ router.post('/:projectId/init-v2', authenticate, requireAdmin, async (req, res) 
         [projectId, i, s.num, s.name, s.sub, s.slot || null]
       );
       const newId = rows[0].id;
-      // Track slot-1 parents: by stage_num if set, or by selfNum if null
       const trackKey = s.slot === 1 ? (s.num || s.selfNum) : null;
       if (trackKey) insertedIds[trackKey] = newId;
-      // Set kanban_parent_id for slot-2 rows
       if (s.slot === 2 && s.parentNum && insertedIds[s.parentNum]) {
         await pool.query(
           'UPDATE passport_stages SET kanban_parent_id=$1 WHERE id=$2',
@@ -317,7 +325,11 @@ router.post('/:projectId/init-v2', authenticate, requireAdmin, async (req, res) 
         'INSERT INTO passport_issues (project_id, sort_order) VALUES ($1,$2)', [projectId, i]
       );
     }
-    res.json({ message: isResidential ? 'Жилой паспорт создан' : 'Административный паспорт создан', type: isResidential ? 'residential' : 'administrative' });
+
+    res.json({
+      message: isResidential ? 'Жилой паспорт создан' : 'Административный паспорт создан',
+      type: isResidential ? 'residential' : 'administrative'
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Ошибка инициализации' });

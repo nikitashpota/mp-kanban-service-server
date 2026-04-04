@@ -11,6 +11,7 @@ const kanbanRoutes = require('./routes/kanban');
 const importRoutes = require('./routes/import_passport');
 const projectTypesRoutes = require('./routes/project_types');
 const analyticsRoutes = require('./routes/analytics');
+const passportPendingRoutes = require('./routes/passport_pending');
 const { pool } = require('./db');
 
 const app = express();
@@ -36,13 +37,13 @@ app.use('/api/kanban', kanbanRoutes);
 app.use('/api/import', importRoutes);
 app.use('/api/project-types', projectTypesRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/pending', passportPendingRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
 // ─── Start ────────────────────────────────────────────────────
 async function initDb() {
-  // Создаём каждую таблицу отдельным запросом — pg не поддерживает multi-statement
   const statements = [
     `CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -72,7 +73,6 @@ async function initDb() {
       sort_order INTEGER DEFAULT 0,
       created_at TIMESTAMP DEFAULT NOW()
     )`,
-    // migrate existing rows that lack photo_type
     `ALTER TABLE project_photos ADD COLUMN IF NOT EXISTS photo_type VARCHAR(30) DEFAULT 'gallery'`,
     `CREATE TABLE IF NOT EXISTS project_contacts (
       id SERIAL PRIMARY KEY,
@@ -99,7 +99,6 @@ async function initDb() {
     `INSERT INTO users (username, password_hash, full_name, role)
      VALUES ('admin', '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', 'Администратор', 'admin')
      ON CONFLICT (username) DO NOTHING`,
-    // ── Паспорт проекта ──
     `CREATE TABLE IF NOT EXISTS project_passport (
       id SERIAL PRIMARY KEY,
       project_id INTEGER UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
@@ -160,18 +159,18 @@ async function initDb() {
     `ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS kanban_slot INTEGER DEFAULT NULL`,
     `ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS kanban_parent_id INTEGER DEFAULT NULL`,
     `ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`,
-`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'pm', 'gip', 'viewer'))`,
-`ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS execution_actual_pending DATE`,
-`ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS execution_actual_pending_2 DATE`,
-`ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS pending_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL`,
-`ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS pending_at TIMESTAMP`,
+    `ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'pm', 'gip', 'viewer'))`,
+    `ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS execution_actual_pending DATE`,
+    `ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS execution_actual_pending_2 DATE`,
+    `ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS pending_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL`,
+    `ALTER TABLE passport_stages ADD COLUMN IF NOT EXISTS pending_at TIMESTAMP`,
   ];
 
   for (const sql of statements) {
     await pool.query(sql);
   }
 
-  // ── Migration: merge ТИМ-модель + Консультационные услуги → КУ ТИМ (заход/выход) ──
+  // Migration: merge ТИМ-модель
   await pool.query(`
     UPDATE passport_stages
     SET stage_name = 'КУ ТИМ', sub_stage_name = 'заход', stage_num = NULL
@@ -179,7 +178,6 @@ async function initDb() {
       AND (stage_name ILIKE '%консульт%' OR stage_name ILIKE '%услуг%')
       AND sub_stage_name IS NULL
   `);
-  // Insert выход row after заход if missing
   await pool.query(`
     INSERT INTO passport_stages (project_id, sort_order, stage_num, stage_name, sub_stage_name)
     SELECT z.project_id, z.sort_order + 1, '20', NULL, 'выход'

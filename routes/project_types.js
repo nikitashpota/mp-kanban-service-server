@@ -1,8 +1,10 @@
 const router = require('express').Router();
 const { pool } = require('../db');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireRole } = require('../middleware/auth');
 
-// GET all types
+const requireEditor = requireRole('pm', 'gip');
+
+// GET all types — все авторизованные
 router.get('/', authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM project_types ORDER BY sort_order, name');
@@ -10,20 +12,20 @@ router.get('/', authenticate, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Ошибка' }); }
 });
 
-// POST create
+// POST create — только admin
 router.post('/', authenticate, requireAdmin, async (req, res) => {
   const { name, color, is_renovation, kanban_type } = req.body;
   if (!name) return res.status(400).json({ error: 'Название обязательно' });
   try {
     const { rows } = await pool.query(
-      'INSERT INTO project_types (name, color, is_renovation, kanban_type) VALUES ($1, $2, $3, $4) RETURNING *',
+      'INSERT INTO project_types (name, color, is_renovation, kanban_type) VALUES ($1,$2,$3,$4) RETURNING *',
       [name, color || '#6b7280', is_renovation || false, kanban_type || 'administrative']
     );
     res.status(201).json(rows[0]);
   } catch (err) { res.status(500).json({ error: 'Ошибка создания' }); }
 });
 
-// PUT update
+// PUT update — только admin
 router.put('/:id', authenticate, requireAdmin, async (req, res) => {
   const { name, color, is_renovation, kanban_type } = req.body;
   try {
@@ -35,7 +37,7 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Ошибка' }); }
 });
 
-// DELETE
+// DELETE — только admin
 router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
   try {
     await pool.query('DELETE FROM project_types WHERE id=$1', [req.params.id]);
@@ -43,8 +45,8 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Ошибка' }); }
 });
 
-// PATCH project type on a project
-router.patch('/assign/:projectId', authenticate, requireAdmin, async (req, res) => {
+// PATCH assign type to project — pm + gip + admin (нужно при создании/редактировании проекта)
+router.patch('/assign/:projectId', authenticate, requireEditor, async (req, res) => {
   const { project_type_id } = req.body;
   try {
     await pool.query(

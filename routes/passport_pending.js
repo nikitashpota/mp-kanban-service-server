@@ -5,14 +5,14 @@ const { authenticate, requireRole } = require('../middleware/auth');
 const requirePM  = requireRole('pm');
 const requireGIP = requireRole('pm', 'gip');
 
-// GET /api/pending/:projectId
+// GET /api/pending/:projectId — список этапов с pending-датами
 router.get('/:projectId', authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT ps.id, ps.stage_name, ps.sub_stage_name, ps.stage_num,
              ps.execution_actual_pending, ps.execution_actual_pending_2,
              ps.pending_at, ps.kanban_slot,
-             u.username AS pending_by_name, u.id AS pending_by_id
+             u.full_name AS pending_by_name, u.id AS pending_by_id
       FROM passport_stages ps
       LEFT JOIN users u ON u.id = ps.pending_by_user_id
       WHERE ps.project_id = $1
@@ -74,19 +74,19 @@ router.post('/reject/:stageId', authenticate, requirePM, async (req, res) => {
   } catch (err) { res.status(500).json({ error: 'Ошибка' }); }
 });
 
-// GET /api/pending/count/all — для бейджа на дашборде
+// GET /api/pending/count/all — бейдж на дашборде
 router.get('/count/all', authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT p.id AS project_id, p.name AS project_name,
              COUNT(*) AS pending_count,
              MAX(ps.pending_at) AS latest_pending,
-             u.username AS latest_by
+             u.full_name AS latest_by
       FROM passport_stages ps
       JOIN projects p ON p.id = ps.project_id
       LEFT JOIN users u ON u.id = ps.pending_by_user_id
       WHERE ps.execution_actual_pending IS NOT NULL OR ps.execution_actual_pending_2 IS NOT NULL
-      GROUP BY p.id, p.name, u.username
+      GROUP BY p.id, p.name, u.full_name
       ORDER BY MAX(ps.pending_at) DESC
     `);
     res.json(rows);

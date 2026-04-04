@@ -4,7 +4,10 @@ const path = require('path');
 const fs = require('fs');
 const XLSX = require('xlsx');
 const { pool } = require('../db');
-const { authenticate, requireAdmin } = require('../middleware/auth');
+const { authenticate, requireAdmin, requireRole } = require('../middleware/auth');
+
+// ГИП и РП могут создавать/редактировать данные проекта
+const requireEditor = requireRole('pm', 'gip');
 
 // --- Multer config ---
 const storage = multer.diskStorage({
@@ -15,8 +18,7 @@ const storage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname);
-    const name = `${Date.now()}-${Math.round(Math.random() * 1e6)}${ext}`;
-    cb(null, name);
+    cb(null, `${Date.now()}-${Math.round(Math.random() * 1e6)}${ext}`);
   }
 });
 
@@ -37,9 +39,7 @@ const uploadXlsx = multer({
   }
 });
 
-// ============================================================
-// GET /api/projects  — список всех проектов (карточки)
-// ============================================================
+// GET /api/projects
 router.get('/', authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query(`
@@ -49,7 +49,8 @@ router.get('/', authenticate, async (req, res) => {
              p.completion_date, p.main_photo, p.description,
              p.gip_name, p.is_active, p.created_at, p.project_type_id,
              pt.name AS type_name, pt.color AS type_color,
-             (SELECT COUNT(*) FROM passport_issues pi WHERE pi.project_id = p.id AND pi.problem IS NOT NULL AND pi.problem != '') AS notes_count
+             (SELECT COUNT(*) FROM passport_issues pi
+              WHERE pi.project_id = p.id AND pi.problem IS NOT NULL AND pi.problem != '') AS notes_count
       FROM projects p
       LEFT JOIN project_types pt ON pt.id = p.project_type_id
       WHERE p.is_active = true
@@ -62,43 +63,27 @@ router.get('/', authenticate, async (req, res) => {
   }
 });
 
-// ============================================================
-// GET /api/projects/:id  — детальная страница проекта
-// ============================================================
+// GET /api/projects/:id
 router.get('/:id', authenticate, async (req, res) => {
   const { id } = req.params;
   try {
     const projectRes = await pool.query('SELECT * FROM projects WHERE id = $1', [id]);
     if (!projectRes.rows[0]) return res.status(404).json({ error: 'Проект не найден' });
 
-    const photosRes = await pool.query(
-      'SELECT * FROM project_photos WHERE project_id = $1 ORDER BY sort_order, id',
-      [id]
-    );
-    const contactsRes = await pool.query(
-      'SELECT * FROM project_contacts WHERE project_id = $1 ORDER BY sort_order, id',
-      [id]
-    );
-    const tepRes = await pool.query(
-      'SELECT * FROM project_tep WHERE project_id = $1 ORDER BY sort_order, id',
-      [id]
-    );
-    const networksRes = await pool.query(
-      'SELECT * FROM engineering_networks WHERE project_id = $1 ORDER BY sort_order, id',
-      [id]
-    );
-    const passportRes = await pool.query(
-      'SELECT * FROM project_passport WHERE project_id = $1',
-      [id]
-    );
-    const passportStagesRes = await pool.query(
-      'SELECT * FROM passport_stages WHERE project_id = $1 ORDER BY sort_order',
-      [id]
-    );
-    const passportIssuesRes = await pool.query(
-      'SELECT * FROM passport_issues WHERE project_id = $1 ORDER BY sort_order',
-      [id]
-    );
+    const [photosRes, contactsRes, tepRes, networksRes, passportRes, passportStagesRes, passportIssuesRes] = await Promise.all([
+      pool.query('SELECT * FROM project_photos WHERE project_id=$1 ORDER BY sort_order, id', [id]),
+      pool.query('SELECT * FROM project_contacts WHERE project_id=$1 ORDER BY sort_order, id', [id]),
+      pool.query('SELECT * FROM project_tep WHERE project_id=$1 ORDER BY sort_order, id', [id]),
+      pool.query('SELECT * FROM engineering_networks WHERE project_id=$1 ORDER BY sort_order, id', [id]),
+      pool.query('SELECT * FROM project_passport WHERE project_id=$1', [id]),
+      pool.query(`
+        SELECT ps.*, u.full_name AS pending_by_name
+        FROM passport_stages ps
+        LEFT JOIN users u ON u.id = ps.pending_by_user_id
+        WHERE ps.project_id=$1 ORDER BY ps.sort_order
+      `, [id]),
+      pool.query('SELECT * FROM passport_issues WHERE project_id=$1 ORDER BY sort_order', [id]),
+    ]);
 
     res.json({
       project: projectRes.rows[0],
@@ -116,30 +101,24 @@ router.get('/:id', authenticate, async (req, res) => {
   }
 });
 
-// ============================================================
-// POST /api/projects  — создать проект
-// ============================================================
-router.post('/', authenticate, requireAdmin, async (req, res) => {
-  const {
-    name, address, inn, kpp, stage, area_total, area_building, area_underground,
+// POST /api/projects — pm + gip + admin
+router.post('/', authenticate, requireEditor, async (req, res) => {
+  const { name, address, inn, kpp, stage, area_total, area_building, area_underground,
     floors_above, floors_below, height, completion_date, description,
-    gip_name, gip_phone, project_type_id
-  } = req.body;
+    gip_name, gip_phone, project_type_id } = req.body;
 
   if (!name) return res.status(400).json({ error: 'Название обязательно' });
-
   const n = v => (v === '' || v == null) ? null : v;
 
   try {
     const { rows } = await pool.query(
-      `INSERT INTO projects
-         (name, address, inn, kpp, stage, area_total, area_building, area_underground,
-          floors_above, floors_below, height, completion_date, description, gip_name, gip_phone, project_type_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-       RETURNING *`,
-      [name, n(address), n(inn), n(kpp), n(stage), n(area_total), n(area_building), n(area_underground),
-       n(floors_above), n(floors_below), n(height), n(completion_date), n(description), n(gip_name), n(gip_phone),
-       n(project_type_id)]
+      `INSERT INTO projects (name, address, inn, kpp, stage, area_total, area_building,
+        area_underground, floors_above, floors_below, height, completion_date,
+        description, gip_name, gip_phone, project_type_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+      [name, n(address), n(inn), n(kpp), n(stage), n(area_total), n(area_building),
+       n(area_underground), n(floors_above), n(floors_below), n(height),
+       n(completion_date), n(description), n(gip_name), n(gip_phone), n(project_type_id)]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -148,33 +127,25 @@ router.post('/', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
-// ============================================================
-// PUT /api/projects/:id  — обновить проект
-// ============================================================
-router.put('/:id', authenticate, requireAdmin, async (req, res) => {
+// PUT /api/projects/:id — pm + gip + admin
+router.put('/:id', authenticate, requireEditor, async (req, res) => {
   const { id } = req.params;
-  const {
-    name, address, inn, kpp, stage,
-    area_total, area_building, area_underground,
-    floors_above, floors_below, height,
-    completion_date, description, gip_name, gip_phone,
-    is_active, is_terminated, project_type_id
-  } = req.body;
-
+  const { name, address, inn, kpp, stage, area_total, area_building, area_underground,
+    floors_above, floors_below, height, completion_date, description,
+    gip_name, gip_phone, is_active, is_terminated, project_type_id } = req.body;
   const n = v => (v === '' || v == null) ? null : v;
 
   try {
     const { rows } = await pool.query(
-      `UPDATE projects SET
-         name=$1, address=$2, inn=$3, kpp=$4, stage=$5,
-         area_total=$6, area_building=$7, area_underground=$8,
-         floors_above=$9, floors_below=$10, height=$11,
-         completion_date=$12, description=$13, gip_name=$14,
-         gip_phone=$15, is_active=$16, is_terminated=$17, project_type_id=$18
+      `UPDATE projects SET name=$1, address=$2, inn=$3, kpp=$4, stage=$5,
+         area_total=$6, area_building=$7, area_underground=$8, floors_above=$9,
+         floors_below=$10, height=$11, completion_date=$12, description=$13,
+         gip_name=$14, gip_phone=$15, is_active=$16, is_terminated=$17, project_type_id=$18
        WHERE id=$19 RETURNING *`,
-      [name, n(address), n(inn), n(kpp), n(stage), n(area_total), n(area_building), n(area_underground),
-       n(floors_above), n(floors_below), n(height), n(completion_date), n(description), n(gip_name),
-       n(gip_phone), is_active ?? true, is_terminated ?? false, n(project_type_id), id]
+      [name, n(address), n(inn), n(kpp), n(stage), n(area_total), n(area_building),
+       n(area_underground), n(floors_above), n(floors_below), n(height),
+       n(completion_date), n(description), n(gip_name), n(gip_phone),
+       is_active ?? true, is_terminated ?? false, n(project_type_id), id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Проект не найден' });
     res.json(rows[0]);
@@ -184,9 +155,7 @@ router.put('/:id', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
-// ============================================================
-// DELETE /api/projects/:id
-// ============================================================
+// DELETE /api/projects/:id — только admin (необратимо)
 router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
   const { id } = req.params;
   try {
@@ -197,33 +166,24 @@ router.delete('/:id', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
-// ============================================================
-// POST /api/projects/:id/photos  — загрузить фото
-// ============================================================
-router.post('/:id/photos', authenticate, requireAdmin,
+// Photos — pm + gip + admin
+router.post('/:id/photos', authenticate, requireEditor,
   uploadPhoto.array('photos', 20), async (req, res) => {
     const { id } = req.params;
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: 'Нет файлов' });
-    }
-
+    if (!req.files?.length) return res.status(400).json({ error: 'Нет файлов' });
     try {
       const inserted = [];
       for (let i = 0; i < req.files.length; i++) {
-        const file = req.files[i];
         const { rows } = await pool.query(
           'INSERT INTO project_photos (project_id, filename, sort_order) VALUES ($1,$2,$3) RETURNING *',
-          [id, file.filename, i]
+          [id, req.files[i].filename, i]
         );
         inserted.push(rows[0]);
       }
-
-      // Если нет главного фото — поставить первое
       const proj = await pool.query('SELECT main_photo FROM projects WHERE id=$1', [id]);
       if (!proj.rows[0]?.main_photo) {
         await pool.query('UPDATE projects SET main_photo=$1 WHERE id=$2', [req.files[0].filename, id]);
       }
-
       res.json(inserted);
     } catch (err) {
       console.error(err);
@@ -232,145 +192,37 @@ router.post('/:id/photos', authenticate, requireAdmin,
   }
 );
 
-// PUT /api/projects/:id/main-photo/:photoId
-router.put('/:id/main-photo/:photoId', authenticate, requireAdmin, async (req, res) => {
+router.put('/:id/main-photo/:photoId', authenticate, requireEditor, async (req, res) => {
   const { id, photoId } = req.params;
   try {
-    const { rows } = await pool.query(
-      'SELECT filename FROM project_photos WHERE id=$1 AND project_id=$2', [photoId, id]
-    );
+    const { rows } = await pool.query('SELECT filename FROM project_photos WHERE id=$1 AND project_id=$2', [photoId, id]);
     if (!rows[0]) return res.status(404).json({ error: 'Фото не найдено' });
     await pool.query('UPDATE projects SET main_photo=$1 WHERE id=$2', [rows[0].filename, id]);
     res.json({ message: 'Главное фото обновлено' });
-  } catch (err) {
-    res.status(500).json({ error: 'Ошибка' });
-  }
+  } catch (err) { res.status(500).json({ error: 'Ошибка' }); }
 });
 
-// DELETE /api/projects/:id/photos/:photoId
-router.delete('/:id/photos/:photoId', authenticate, requireAdmin, async (req, res) => {
+router.delete('/:id/photos/:photoId', authenticate, requireEditor, async (req, res) => {
   const { id, photoId } = req.params;
   try {
-    const { rows } = await pool.query(
-      'SELECT filename FROM project_photos WHERE id=$1 AND project_id=$2', [photoId, id]
-    );
+    const { rows } = await pool.query('SELECT filename FROM project_photos WHERE id=$1 AND project_id=$2', [photoId, id]);
     if (!rows[0]) return res.status(404).json({ error: 'Фото не найдено' });
-
     const filepath = path.join(__dirname, '../uploads', rows[0].filename);
     if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
-
     await pool.query('DELETE FROM project_photos WHERE id=$1', [photoId]);
     res.json({ message: 'Фото удалено' });
-  } catch (err) {
-    res.status(500).json({ error: 'Ошибка удаления фото' });
-  }
+  } catch (err) { res.status(500).json({ error: 'Ошибка удаления фото' }); }
 });
 
-// ============================================================
-// POST /api/projects/:id/tep/upload  — импорт ТЭП из XLSX
-// ============================================================
-router.post('/:id/tep/upload', authenticate, requireAdmin,
-  uploadXlsx.single('file'), async (req, res) => {
-    const { id } = req.params;
-    if (!req.file) return res.status(400).json({ error: 'Нет файла' });
-
-    try {
-      const filepath = path.join(__dirname, '../uploads', req.file.filename);
-      const workbook = XLSX.readFile(filepath);
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-
-      // Ожидаемый формат: [Наименование, Значение, Ед.измерения]
-      // Первая строка — заголовок, пропускаем
-      const rows = data.slice(1).filter(r => r[0] && String(r[0]).trim());
-
-      // Очистить старые ТЭП
-      await pool.query('DELETE FROM project_tep WHERE project_id = $1', [id]);
-
-      for (let i = 0; i < rows.length; i++) {
-        const [name, value, unit] = rows[i];
-        await pool.query(
-          'INSERT INTO project_tep (project_id, parameter_name, value, unit, sort_order) VALUES ($1,$2,$3,$4,$5)',
-          [id, String(name).trim(), String(value ?? '').trim(), String(unit ?? '').trim(), i]
-        );
-      }
-
-      // Удалить xlsx после обработки
-      fs.unlinkSync(filepath);
-
-      const { rows: tep } = await pool.query(
-        'SELECT * FROM project_tep WHERE project_id=$1 ORDER BY sort_order', [id]
-      );
-      res.json({ message: `Импортировано ${tep.length} строк ТЭП`, tep });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: 'Ошибка импорта XLSX: ' + err.message });
-    }
-  }
-);
-
-// ============================================================
-// Contacts CRUD
-// ============================================================
-router.post('/:id/contacts', authenticate, requireAdmin, async (req, res) => {
-  const { id } = req.params;
-  const { legal_entity, position, person_name, email, sort_order } = req.body;
-  try {
-    const { rows } = await pool.query(
-      `INSERT INTO project_contacts (project_id, legal_entity, position, person_name, email, sort_order)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [id, legal_entity, position, person_name, email, sort_order ?? 0]
-    );
-    res.status(201).json(rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Ошибка добавления контакта' });
-  }
-});
-
-router.put('/:id/contacts/:contactId', authenticate, requireAdmin, async (req, res) => {
-  const { contactId } = req.params;
-  const { legal_entity, position, person_name, email } = req.body;
-  try {
-    const { rows } = await pool.query(
-      `UPDATE project_contacts SET legal_entity=$1, position=$2, person_name=$3, email=$4
-       WHERE id=$5 RETURNING *`,
-      [legal_entity, position, person_name, email, contactId]
-    );
-    res.json(rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Ошибка обновления' });
-  }
-});
-
-router.delete('/:id/contacts/:contactId', authenticate, requireAdmin, async (req, res) => {
-  const { contactId } = req.params;
-  try {
-    await pool.query('DELETE FROM project_contacts WHERE id=$1', [contactId]);
-    res.json({ message: 'Удалено' });
-  } catch (err) {
-    res.status(500).json({ error: 'Ошибка удаления' });
-  }
-});
-
-// ============================================================
-// Stages CRUD
-// ============================================================
-
-// PUT /api/projects/:id/photos/:photoId/type
-router.put('/:id/photos/:photoId/type', authenticate, requireAdmin, async (req, res) => {
+router.put('/:id/photos/:photoId/type', authenticate, requireEditor, async (req, res) => {
   const { id, photoId } = req.params;
   const { photo_type } = req.body;
   const allowed = ['main', 'location', 'site_plan', 'elevation', 'gallery'];
   if (!allowed.includes(photo_type)) return res.status(400).json({ error: 'Недопустимый тип' });
   try {
-    // If setting main/location/site_plan/elevation — сбросить предыдущий с таким же типом
     if (photo_type !== 'gallery') {
-      await pool.query(
-        `UPDATE project_photos SET photo_type='gallery' WHERE project_id=$1 AND photo_type=$2`,
-        [id, photo_type]
-      );
+      await pool.query(`UPDATE project_photos SET photo_type='gallery' WHERE project_id=$1 AND photo_type=$2`, [id, photo_type]);
     }
-    // If setting main — also update projects.main_photo
     const { rows } = await pool.query(
       'UPDATE project_photos SET photo_type=$1 WHERE id=$2 AND project_id=$3 RETURNING *',
       [photo_type, photoId, id]
@@ -380,25 +232,81 @@ router.put('/:id/photos/:photoId/type', authenticate, requireAdmin, async (req, 
       await pool.query('UPDATE projects SET main_photo=$1 WHERE id=$2', [rows[0].filename, id]);
     }
     res.json(rows[0]);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Ошибка' });
-  }
+  } catch (err) { res.status(500).json({ error: 'Ошибка' }); }
 });
 
-// ============================================================
-// Engineering networks CRUD
-// ============================================================
-router.get('/:id/networks', authenticate, async (req, res) => {
+// ТЭП — pm + gip + admin
+router.post('/:id/tep/upload', authenticate, requireEditor,
+  uploadXlsx.single('file'), async (req, res) => {
+    const { id } = req.params;
+    if (!req.file) return res.status(400).json({ error: 'Нет файла' });
+    try {
+      const filepath = path.join(__dirname, '../uploads', req.file.filename);
+      const workbook = XLSX.readFile(filepath);
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+      const dataRows = data.slice(1).filter(r => r[0] && String(r[0]).trim());
+      await pool.query('DELETE FROM project_tep WHERE project_id=$1', [id]);
+      for (let i = 0; i < dataRows.length; i++) {
+        const [name, value, unit] = dataRows[i];
+        await pool.query(
+          'INSERT INTO project_tep (project_id, parameter_name, value, unit, sort_order) VALUES ($1,$2,$3,$4,$5)',
+          [id, String(name).trim(), String(value ?? '').trim(), String(unit ?? '').trim(), i]
+        );
+      }
+      fs.unlinkSync(filepath);
+      const { rows: tep } = await pool.query('SELECT * FROM project_tep WHERE project_id=$1 ORDER BY sort_order', [id]);
+      res.json({ message: `Импортировано ${tep.length} строк ТЭП`, tep });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Ошибка импорта XLSX: ' + err.message });
+    }
+  }
+);
+
+// Contacts — pm + gip + admin
+router.post('/:id/contacts', authenticate, requireEditor, async (req, res) => {
+  const { id } = req.params;
+  const { legal_entity, position, person_name, email, sort_order } = req.body;
   try {
     const { rows } = await pool.query(
-      'SELECT * FROM engineering_networks WHERE project_id=$1 ORDER BY sort_order', [req.params.id]
+      `INSERT INTO project_contacts (project_id, legal_entity, position, person_name, email, sort_order)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [id, legal_entity, position, person_name, email, sort_order ?? 0]
     );
+    res.status(201).json(rows[0]);
+  } catch (err) { res.status(500).json({ error: 'Ошибка добавления контакта' }); }
+});
+
+router.put('/:id/contacts/:contactId', authenticate, requireEditor, async (req, res) => {
+  const { contactId } = req.params;
+  const { legal_entity, position, person_name, email } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE project_contacts SET legal_entity=$1, position=$2, person_name=$3, email=$4 WHERE id=$5 RETURNING *`,
+      [legal_entity, position, person_name, email, contactId]
+    );
+    res.json(rows[0]);
+  } catch (err) { res.status(500).json({ error: 'Ошибка обновления' }); }
+});
+
+router.delete('/:id/contacts/:contactId', authenticate, requireEditor, async (req, res) => {
+  const { contactId } = req.params;
+  try {
+    await pool.query('DELETE FROM project_contacts WHERE id=$1', [contactId]);
+    res.json({ message: 'Удалено' });
+  } catch (err) { res.status(500).json({ error: 'Ошибка удаления' }); }
+});
+
+// Engineering networks — pm + gip + admin
+router.get('/:id/networks', authenticate, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM engineering_networks WHERE project_id=$1 ORDER BY sort_order', [req.params.id]);
     res.json(rows);
   } catch (err) { res.status(500).json({ error: 'Ошибка' }); }
 });
 
-router.put('/:id/networks', authenticate, requireAdmin, async (req, res) => {
+router.put('/:id/networks', authenticate, requireEditor, async (req, res) => {
   const { id } = req.params;
   const { networks } = req.body;
   const n = v => (v === '' || v == null) ? null : v;
@@ -411,9 +319,7 @@ router.put('/:id/networks', authenticate, requireAdmin, async (req, res) => {
         [id, i, n(net.name), n(net.specification)]
       );
     }
-    const { rows } = await pool.query(
-      'SELECT * FROM engineering_networks WHERE project_id=$1 ORDER BY sort_order', [id]
-    );
+    const { rows } = await pool.query('SELECT * FROM engineering_networks WHERE project_id=$1 ORDER BY sort_order', [id]);
     res.json(rows);
   } catch (err) {
     console.error(err);
