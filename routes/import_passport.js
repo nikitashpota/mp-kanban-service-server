@@ -15,8 +15,9 @@ const RESIDENTIAL_MAP = {
   '3':   { stage_num: null,     sub: null, skip: true },
   '3.1': { stage_num: '5',      sub: 'инженерно-геодезические' },
   '3.2': { stage_num: '6',      sub: 'инженерно-геологические' },
-  '3.3': { stage_num: '7',      sub: 'инженерно-экологические' },
-  '3.4': { stage_num: '9',      sub: 'обследование' },
+  '3.3': { stage_num: null,     sub: null, skip: true }, // гидрологические — нет в БД
+  '3.4': { stage_num: '7',      sub: 'инженерно-экологические' },
+  '3.5': { stage_num: '9',      sub: 'обследование' },
   '4':   { stage_num: 'kvart',  sub: 'получение' },
   '5':   { stage_num: '10',     sub: 'направлены в МФР' },
   '6':   { stage_num: '13',     sub: null },
@@ -123,19 +124,21 @@ function parseRuDate(s) {
   return null;
 }
 
-// Для административного XLSX: col[5] может содержать
-//   - Date-объект              → берём эту дату (actual)
-//   - строку "дата1\nдата2"   → берём ПОСЛЕДНЮЮ дату (directive + actual)
-//   - строку с одной датой    → берём её
-// Возвращает строку "yyyy-mm-dd" или null.
+// Универсальный парсер последней даты из ячейки.
+// Поддерживает разделители: \n, →, /
+// Пропускает "не определено", "-", любой нечисловой текст → null.
+// Из нескольких дат берёт ПОСЛЕДНЮЮ (актуальную).
 function parseLastDate(v) {
   if (!v) return null;
   if (v instanceof Date) {
     return new Date(v.getTime() + 12 * 60 * 60 * 1000).toISOString().slice(0, 10);
   }
   if (typeof v === 'string') {
-    const parts = v.split('\n').map(s => s.trim()).filter(Boolean);
-    return parseRuDate(parts[parts.length - 1]) || null;
+    const parts = v.split(/[\n→\/]/).map(s => s.trim()).filter(Boolean);
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const d = parseRuDate(parts[i]);
+      if (d) return d;
+    }
   }
   return null;
 }
@@ -184,6 +187,8 @@ router.post('/:projectId/xlsx', authenticate, requireEditor, upload.single('file
 
     // ── Жилые объекты ──────────────────────────────────────────────────────────
     if (kanbanType === 'residential') {
+      let lastStageNum = null; // для привязки sub-строк (выход и пр.) к родителю
+
       for (let ri = 2; ri < rows.length; ri++) {
         const row = rows[ri];
         if (!row || row.every(v => v === null)) continue;
@@ -195,8 +200,11 @@ router.post('/:projectId/xlsx', authenticate, requireEditor, upload.single('file
         const colG = row[6] != null ? String(row[6]).trim() : '';
         const colH = row[7] != null ? String(row[7]).trim() : '';
 
-        const deadline  = parseDate(colE);
-        const execution = parseDate(colF);
+        // Используем parseLastDate для обеих дат:
+        //  - "не определено", "-" → null (автоматически)
+        //  - "дата1 → дата2", "дата1\nдата2", "дата1/дата2" → последняя дата
+        const deadline  = parseLastDate(colE);
+        const execution = parseLastDate(colF);
         const fields    = {};
         if (deadline)  fields.deadline_contract = deadline;
         if (execution) fields.execution_actual  = execution;
@@ -210,6 +218,8 @@ router.post('/:projectId/xlsx', authenticate, requireEditor, upload.single('file
           const { stage_num, sub } = mapping;
           if (!stage_num) continue;
 
+          lastStageNum = stage_num; // запоминаем для последующих sub-строк
+
           let target = null;
           if (sub) target = stageByNumAndSub[`${stage_num}::${sub.toLowerCase()}`];
           if (!target && stageByNum[stage_num]) target = stageByNum[stage_num][0];
@@ -218,11 +228,25 @@ router.post('/:projectId/xlsx', authenticate, requireEditor, upload.single('file
 
         } else if (!colA && colC) {
           const subNorm = colC.toLowerCase().trim();
-          const dbMatch = stagesRes.rows.find(s =>
-            s.sub_stage_name && s.sub_stage_name.toLowerCase().trim().startsWith(subNorm.slice(0, 12))
-          );
+
+          // Сначала ищем по lastStageNum + sub_stage_name (точная привязка к родителю)
+          let dbMatch = null;
+          if (lastStageNum) {
+            dbMatch = stagesRes.rows.find(s =>
+              s.stage_num === lastStageNum &&
+              s.sub_stage_name &&
+              s.sub_stage_name.toLowerCase().trim().startsWith(subNorm.slice(0, 14))
+            );
+          }
+          // Если не нашли — fallback: глобальный поиск по sub_stage_name
+          if (!dbMatch) {
+            dbMatch = stagesRes.rows.find(s =>
+              s.sub_stage_name && s.sub_stage_name.toLowerCase().trim().startsWith(subNorm.slice(0, 12))
+            );
+          }
           if (dbMatch) updates.push({ id: dbMatch.id, fields });
 
+          // Slot-2: специальные подстроки обновляют _2-поля родителя
           const slotEntry = Object.entries(RESIDENTIAL_SUB_ROW_MAP).find(([k]) => subNorm.startsWith(k));
           if (slotEntry) {
             const { stage_num, slot } = slotEntry[1];
