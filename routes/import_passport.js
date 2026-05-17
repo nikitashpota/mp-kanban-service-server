@@ -265,8 +265,22 @@ router.post('/:projectId/xlsx', authenticate, requireEditor, upload.single('file
 
     } else {
       // ── Административные объекты ────────────────────────────────────────────
-      // Строки 0-8: заголовки и метаданные, данные начинаются с row 9
-      for (let ri = 9; ri < rows.length; ri++) {
+      // Ищем первую строку данных динамически:
+      // это первая строка, где col[0] === 1 (целое число, первый этап).
+      // Защищает от разных форматов шапки (с/без строки номеров колонок).
+      let dataStart = -1;
+      for (let ri = 0; ri < rows.length; ri++) {
+        const row = rows[ri];
+        if (row && row[0] === 1 && typeof row[0] === 'number') {
+          dataStart = ri;
+          break;
+        }
+      }
+      if (dataStart === -1) {
+        return res.status(400).json({ error: 'Не удалось найти начало данных в файле. Убедитесь, что первый этап имеет номер 1 в первой колонке.' });
+      }
+
+      for (let ri = dataStart; ri < rows.length; ri++) {
         const row = rows[ri];
         if (!row || row.every(v => v === null)) continue;
 

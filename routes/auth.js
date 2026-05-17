@@ -6,14 +6,16 @@ const jwt = require('jsonwebtoken');
 const SECRET = process.env.JWT_SECRET || 'mosproekt-secret-2024';
 
 router.post('/login', async (req, res) => {
-  const { username, password } = req.body;
+  const { username: rawUsername, password } = req.body;
+  // Убираем пробелы по краям и приводим к нижнему регистру
+  const username = (rawUsername || '').trim().toLowerCase();
   console.log('[LOGIN] attempt:', username);
 
   if (!username || !password) return res.status(400).json({ error: 'Заполните все поля' });
 
   try {
     const { rows } = await pool.query(
-      'SELECT id, username, password_hash, role, full_name FROM users WHERE username=$1',
+      'SELECT id, username, password_hash, role, full_name FROM users WHERE LOWER(username)=$1',
       [username]
     );
     console.log('[LOGIN] user found:', rows.length, rows[0]?.username, rows[0]?.role);
